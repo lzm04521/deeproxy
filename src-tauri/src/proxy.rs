@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::HeaderValue,
+    http::{HeaderValue, Method},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -9,6 +9,7 @@ use axum::{
 use hyper::{StatusCode, Uri};
 use hyper_tls::HttpsConnector;
 use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioExecutor};
+use http_body_util::BodyExt;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,6 +34,7 @@ pub type SharedServerState = Arc<Mutex<Option<ServerState>>>;
 struct ServerContext {
     client: Client,
     conf: Config,
+    cached_models: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -41,7 +43,6 @@ pub struct Config {
     port: i32,
     apikey: String,
     api_addr: String,
-    model: String,
     skills: Vec<String>,
 }
 
@@ -61,6 +62,11 @@ impl ServerState {
             hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
         let mut skills = conf.skills.clone();
         skills.push("completion".to_string());
+        
+        // Fetch models from upstream API on startup
+        let cached_models = fetch_models_from_api(&conf.api_addr, &conf.apikey).await;
+        println!("Cached {} models on startup", cached_models.len());
+        
         let app = Router::new()
             .route("/", get(|| async { Json(json!({"hello":"world"})) }))
             .route(
@@ -75,7 +81,10 @@ impl ServerState {
                 "/api/tags",
                 get(|State(ctx): State<Arc<ServerContext>>| async move {
                     println!("get api tags");
-                    Json(json!({"models":[{"model":ctx.conf.model.clone(),"name":ctx.conf.model.clone()}]}))
+                    let models: Vec<serde_json::Value> = ctx.cached_models.iter()
+                        .map(|m| json!({"model": m, "name": m}))
+                        .collect();
+                    Json(json!({"models": models}))
                 }),
             )
             .route("/v1/chat/completions", post(post_chat_completions))
@@ -88,6 +97,7 @@ impl ServerState {
             .with_state(Arc::new(ServerContext {
                 client: client,
                 conf: conf,
+                cached_models,
             }));
 
         let server_task_handle = tokio::spawn(async move {
@@ -112,7 +122,13 @@ pub async fn start_server(handle: tauri::AppHandle) -> Result<(), String> {
     handle
         .emit_to("main", "connect_status", "connecting")
         .unwrap();
-    return start_api_server(handle).await;
+    let result = start_api_server(handle.clone()).await;
+    if result.is_err() {
+        handle
+            .emit_to("main", "connect_status", "disconnected")
+            .unwrap();
+    }
+    result
 }
 
 pub async fn start_api_server(handle: tauri::AppHandle) -> Result<(), String> {
@@ -212,4 +228,71 @@ pub async fn stop(handle: tauri::AppHandle) -> Result<String, String> {
 pub async fn restart(handle: tauri::AppHandle) -> Result<(), String> {
     let _ = stop_server(handle.clone()).await;
     return start_server(handle).await;
+}
+
+async fn fetch_models_from_api(api_addr: &str, apikey: &str) -> Vec<String> {
+    let https = HttpsConnector::new();
+    let client =
+        hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
+
+    let mut url = api_addr.to_string();
+    if url.ends_with('/') {
+        url.pop();
+    }
+    let uri = format!("{}/models", url);
+    let uri = match uri.parse::<Uri>() {
+        Ok(u) => u,
+        Err(_) => return Vec::new(),
+    };
+
+    let req = match hyper::Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", apikey))
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let resp = match client.request(req).await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+
+    let body = match resp.into_body().collect().await {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    let text = match String::from_utf8(body.to_bytes().to_vec()) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(j) => j,
+        Err(_) => return Vec::new(),
+    };
+
+    json.get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn fetch_models(api_addr: String, apikey: String) -> Result<Vec<String>, String> {
+    let models = fetch_models_from_api(&api_addr, &apikey).await;
+    if models.is_empty() {
+        return Err("Failed to fetch models".to_string());
+    }
+    Ok(models)
 }

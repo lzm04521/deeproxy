@@ -16,8 +16,6 @@ type Config = {
   port: number;
   api_addr: string;
   apikey: string;
-  model: string;
-  models: string[];
   skills: string[];
 }
 
@@ -29,8 +27,6 @@ function App() {
   const [addr, setAddr] = useState("localhost");
   const [apiAddr, setApiAddr] = useState("https://api.deepseek.com/v1");
   const [apikey, setApikey] = useState("");
-  const [models, setModels] = useState<string[]>([]);
-  const [model, setModel] = useState<string>("");
   const [skills, setSkills] = useState<string[]>([]);
   const [connectStatus, setConnectStatus] = useState<ConnectStatus>("disconnected");
   const trayRef = useRef<TrayIcon>(null);
@@ -95,7 +91,6 @@ function App() {
       setPort(config.port || 11434);
       setApikey(config.apikey || "");
       setApiAddr(config.api_addr || "https://api.deepseek.com/v1");
-      setModel(config.model || "");
       setSkills(config.skills || []);
     })();
   }, []);
@@ -107,39 +102,6 @@ function App() {
   }, []);
 
   const aboutRef = useRef<HTMLDialogElement>(null);
-
-  useEffect(() => {
-    if (apiAddr && apiAddr.length > 0 && apikey.length > 0) {
-      const query = async () => {
-        if (apiAddr && apiAddr.length > 0 && apikey.length > 0) {
-          try {
-            const res = await fetch(`${apiAddr}/models`, {
-              method: "GET",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${apikey}`
-              }
-            });
-            if (res.ok) {
-              const data = await res.json();
-              const m: string[] = [];
-              data.data.map((item: any) => {
-                m.push(item.id);
-              });
-              if (m.length > 0) {
-                setModels(m);
-              }
-            } else {
-              console.error("API请求失败:", res.status, res.statusText);
-            }
-          } catch (error) {
-            console.error("获取模型列表失败:", error);
-          }
-        }
-      };
-      query();
-    }
-  }, [apiAddr, apikey]);
 
   return (
     <main className={"w-screen h-screen overflow-hidden flex flex-col items-start justify-start gap-2 px-3 pt-1 pb-3 font-semibold text-sm text-center bg-neutral-200/35"}>
@@ -211,27 +173,6 @@ function App() {
               setApiAddr(target.value)
             }}
           />
-        </div>
-        <div className={"w-full grid grid-cols-8 items-center p-1 gap-1"}>
-          <span className="label col-span-2 select-none cursor-default">选择模型:</span>
-          <select
-            className={"select select-xs col-span-6 focus-within:outline-0 p-1"}
-            onChange={(e: JSX.TargetedEvent<HTMLSelectElement, Event>) => {
-              const target = e.target as HTMLSelectElement;
-              setModel(target.value);
-            }}
-            value={model.length === 0 ? "chooseModel" : model}
-            disabled={models.length === 0 || connectStatus !== "disconnected"}
-          >
-            <option value="chooseModel" disabled>
-              选择模型
-            </option>
-            {models.map((item) => {
-              return (
-                <option key={item} value={item}>{item}</option>
-              )
-            })}
-          </select>
         </div>
         <div className={"w-full grid grid-cols-8 items-center p-1 gap-1"}>
           <span className="label col-span-2 select-none cursor-default">模型能力:</span>
@@ -309,10 +250,15 @@ function App() {
           className={"btn btn-xs btn-success select-none cursor-default"}
           onClick={() => {
             (async () => {
-              if (connectStatus === "disconnected") {
-                invoke("start_server");
-              } else {
-                invoke("restart");
+              try {
+                if (connectStatus === "disconnected") {
+                  await invoke("start_server");
+                } else {
+                  await invoke("restart");
+                }
+              } catch (error) {
+                console.error("Start/restart failed:", error);
+                setConnectStatus("disconnected");
               }
             })();
           }}
@@ -328,8 +274,6 @@ function App() {
               port: port,
               api_addr: apiAddr,
               apikey: apikey,
-              model: model,
-              models: models,
               skills: skills
             };
 
@@ -365,9 +309,9 @@ function App() {
             <h3 className={"font-semibold text-lg"}>关于Deeproxy</h3>
             <p className={"font-mono text-sm cursor-pointer hover:underline hover:text-primary"} onClick={() => {
               aboutRef.current?.close();
-              openUrl("https://github.com/wrtx-dev/deeproxy");
+              openUrl("https://github.com/lzm04521/deeproxy");
             }}>
-              github.com/wrtx-dev/deeproxy
+              github.com/lzm04521/deeproxy
             </p>
             <div className={"modal-action"}>
               <form method={"dialog"}>

@@ -38,6 +38,7 @@ pub fn run() {
             tray::tray_stop_server,
             tray::tray_restart_server,
             tray::tray_show_setup,
+            proxy::fetch_models,
         ])
         .manage(Arc::new(Mutex::new(None)) as proxy::SharedServerState)
         .on_window_event(|window, event| {
@@ -55,7 +56,7 @@ pub fn run() {
                 .visible(false)
                 .minimizable(false)
                 .maximizable(false)
-                .inner_size(400.0, 375.0);
+                .inner_size(400.0, 320.0);
             #[cfg(target_os = "macos")]
             let win_builder = win_builder.hidden_title(true);
 

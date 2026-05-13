@@ -24,7 +24,7 @@ Copilot Chat。
 1. 克隆仓库
 
 ```bash
-git clone https://github.com/wrtx-dev/deeproxy.git
+git clone https://github.com/lzm04521/deeproxy.git
 cd deeproxy
 ```
 

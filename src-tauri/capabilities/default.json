@@ -2,19 +2,17 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": [
-    "main"
-  ],
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:default",
     "core:window:allow-start-dragging",
     "store:default",
     {
-      "identifier":"opener:allow-open-url",
+      "identifier": "opener:allow-open-url",
       "allow": [
         {
-          "url": "https://github.com/wrtx-dev/deeproxy"
+          "url": "https://github.com/lzm04521/deeproxy"
         }
       ]
     },

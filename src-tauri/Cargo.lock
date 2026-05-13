@@ -781,6 +781,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "cocoa",
+ "http-body-util",
  "hyper",
  "hyper-tls",
  "hyper-util",
