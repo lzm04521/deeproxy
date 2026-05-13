@@ -8,7 +8,7 @@ Copilot Chat。
 
 - 将Ollama API转换为OpenAI兼容格式
 - 提供本地代理服务，监听指定端口
-- 直接透传所有模型，可以在Copilot中维护具体的模型
+- 直接透传所有模型，可以在Copilot中对模型显示和隐藏
 - 轻量级Tauri桌面应用
 
 ## 安装使用
