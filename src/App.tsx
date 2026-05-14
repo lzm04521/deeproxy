@@ -17,6 +17,7 @@ type Config = {
   apikey: string;
   skills: string[];
   selected_models: string[];
+  autostart?: boolean;
 }
 
 type ConnectStatus = "disconnected" | "connecting" | "connected";
@@ -34,6 +35,8 @@ function App() {
   const [tempSelectedModels, setTempSelectedModels] = useState<string[]>([]);
   const [connectStatus, setConnectStatus] = useState<ConnectStatus>("disconnected");
   const [isStarting, setIsStarting] = useState(false);
+  const [showSaveSuccess, setShowSaveSuccess] = useState(false);
+  const [autostart, setAutostart] = useState(false);
   const trayRef = useRef<TrayIcon>(null);
   const menuRef = useRef<Menu>(null);
   const modelModalRef = useRef<HTMLDialogElement>(null);
@@ -118,6 +121,14 @@ function App() {
       setApiAddr(config.api_addr || "https://api.deepseek.com/v1");
       setSkills(config.skills || []);
       setSelectedModels(config.selected_models || []);
+      
+      // 加载开机自启状态
+      try {
+        const autoStartEnabled = await invoke<boolean>("is_autostart_enabled");
+        setAutostart(autoStartEnabled);
+      } catch (e) {
+        console.error("Failed to get autostart status:", e);
+      }
     })();
   }, []);
 
@@ -205,19 +216,45 @@ function App() {
               api_addr: apiAddr,
               apikey: apikey,
               skills: skills,
-              selected_models: selectedModels
+              selected_models: selectedModels,
+              autostart: autostart
             };
 
             (async () => {
               const store = await Store.load("config.json");
               await store.set("config", config);
               await store.save();
+              
+              // 设置开机自启
+              try {
+                await invoke("set_autostart", { enabled: autostart });
+              } catch (e) {
+                console.error("Failed to set autostart:", e);
+              }
+              
+              // 显示保存成功提示
+              setShowSaveSuccess(true);
+              setTimeout(() => {
+                setShowSaveSuccess(false);
+              }, 2000);
             })();
           }}
           disabled={addr.length === 0 || port < 1 || port > 65535 || !isValidIpAddress(addr) || apiAddr.length === 0 || apikey.length === 0 || connectStatus !== "disconnected"}
         >
           {`保存`}
         </button>
+        
+        {/* 保存成功提示 */}
+        {showSaveSuccess && (
+          <div className="fixed top-4 right-4 z-50 animate-bounce">
+            <div className="alert alert-success shadow-lg">
+              <svg xmlns="http://www.w3.org/2000/svg" className="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span>保存成功！</span>
+            </div>
+          </div>
+        )}
       </div>
       <div className={"w-full min-h-[360px] flex flex-col gap-2 p-2 border border-neutral-300/75 rounded-sm overflow-y-auto min-h-0"}>
         <div className={"w-full grid grid-cols-8 items-center p-1 gap-1"}>
@@ -367,6 +404,41 @@ function App() {
                 }}
               />
               thinking
+            </label>
+          </div>
+        </div>
+        <div className={"w-full grid grid-cols-8 items-center p-1 gap-1"}>
+          <span className="label col-span-2 select-none cursor-default">开机自启:</span>
+          <div className={"col-span-6 flex flex-row items-center p-1"}>
+            <label className={"label font-mono text-xs select-none cursor-default flex items-center gap-2"}>
+              <input
+                type="checkbox"
+                className={"toggle toggle-primary toggle-sm"}
+                checked={autostart}
+                onChange={async () => {
+                  const newAutostart = !autostart;
+                  setAutostart(newAutostart);
+                  
+                  // 立即保存开机自启设置
+                  try {
+                    await invoke("set_autostart", { enabled: newAutostart });
+                    
+                    // 只更新配置文件中的 autostart 字段
+                    const store = await Store.load("config.json");
+                    const config = await store.get("config") as Config;
+                    if (config) {
+                      config.autostart = newAutostart;
+                      await store.set("config", config);
+                      await store.save();
+                    }
+                  } catch (e) {
+                    console.error("Failed to set autostart:", e);
+                    // 如果失败，恢复原状态
+                    setAutostart(!newAutostart);
+                  }
+                }}
+              />
+              <span>启用开机自启动</span>
             </label>
           </div>
         </div>
