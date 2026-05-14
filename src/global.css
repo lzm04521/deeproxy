@@ -1,6 +1,48 @@
 @import "tailwindcss";
 @plugin "daisyui";
 
+/* 防止 html/body 出现滚动条导致黑条 */
+html, body {
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
 [disabled]{
     cursor: default;
+}
+
+/* 模态框样式优化 - 仅在 dialog[open] 时生效，避免覆盖原生 display:none */
+.modal[open] {
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.modal-box {
+  max-height: 85vh !important;
+  overflow-y: auto !important;
+  width: calc(85vw) !important;
+  max-width: none !important;
+  margin: 0 auto !important;
+  padding: 1rem !important;
+}
+
+/* 自定义滚动条样式 */
+.modal-box::-webkit-scrollbar {
+  width: 6px;
+}
+
+.modal-box::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.modal-box::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+.modal-box::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.3);
 }

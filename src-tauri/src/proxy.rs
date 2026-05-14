@@ -6,13 +6,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use http_body_util::BodyExt;
 use hyper::{StatusCode, Uri};
 use hyper_tls::HttpsConnector;
 use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioExecutor};
-use http_body_util::BodyExt;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 use tokio::{
@@ -44,6 +45,7 @@ pub struct Config {
     apikey: String,
     api_addr: String,
     skills: Vec<String>,
+    selected_models: Vec<String>,
 }
 
 impl ServerState {
@@ -58,15 +60,21 @@ impl ServerState {
             .map_err(|e| format!("Failed to get local address: {}", e))?;
         let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
         let https = HttpsConnector::new();
-        let client: Client =
-            hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
+        let mut client_builder = hyper_util::client::legacy::Client::builder(TokioExecutor::new());
+        // Configure connection pool: idle connections expire after 10s to reduce stale connection errors
+        client_builder.pool_idle_timeout(Duration::from_secs(10));
+        // Limit max idle connections per host to reduce resource usage
+        client_builder.pool_max_idle_per_host(2);
+        // Retry requests that fail because the pooled connection was closed by the server
+        client_builder.retry_canceled_requests(true);
+        let client: Client = client_builder.build(https);
         let mut skills = conf.skills.clone();
         skills.push("completion".to_string());
-        
+
         // Fetch models from upstream API on startup
         let cached_models = fetch_models_from_api(&conf.api_addr, &conf.apikey).await;
         println!("Cached {} models on startup", cached_models.len());
-        
+
         let app = Router::new()
             .route("/", get(|| async { Json(json!({"hello":"world"})) }))
             .route(
@@ -81,19 +89,32 @@ impl ServerState {
                 "/api/tags",
                 get(|State(ctx): State<Arc<ServerContext>>| async move {
                     println!("get api tags");
-                    let models: Vec<serde_json::Value> = ctx.cached_models.iter()
+                    let models_to_return = if ctx.conf.selected_models.is_empty() {
+                        ctx.cached_models.clone()
+                    } else {
+                        ctx.cached_models
+                            .iter()
+                            .filter(|m| ctx.conf.selected_models.contains(m))
+                            .cloned()
+                            .collect()
+                    };
+                    let models: Vec<serde_json::Value> = models_to_return
+                        .iter()
                         .map(|m| json!({"model": m, "name": m}))
                         .collect();
                     Json(json!({"models": models}))
                 }),
             )
             .route("/v1/chat/completions", post(post_chat_completions))
-            .route("/api/show",post(async move||{
-                Json(json!({
-                    "model_info": { "general.architecture": "qwen2" },
-                    "capabilities":skills,
-                }))
-            }))
+            .route(
+                "/api/show",
+                post(async move || {
+                    Json(json!({
+                        "model_info": { "general.architecture": "qwen2" },
+                        "capabilities":skills,
+                    }))
+                }),
+            )
             .with_state(Arc::new(ServerContext {
                 client: client,
                 conf: conf,
@@ -171,8 +192,21 @@ async fn post_chat_completions(
     State(ctx): State<Arc<ServerContext>>,
     mut req: Request,
 ) -> Result<Response, StatusCode> {
-    req.headers_mut().remove("Authorization");
-    req.headers_mut().append(
+    // Strip hop-by-hop headers that should not be forwarded
+    // See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers#hop-by-hop_headers
+    req.headers_mut().remove("Connection");
+    req.headers_mut().remove("Keep-Alive");
+    req.headers_mut().remove("Proxy-Authenticate");
+    req.headers_mut().remove("Proxy-Authorization");
+    req.headers_mut().remove("TE");
+    req.headers_mut().remove("Trailers");
+    req.headers_mut().remove("Transfer-Encoding");
+    req.headers_mut().remove("Upgrade");
+    // Remove Content-Length since we may have modified the body
+    req.headers_mut().remove("Content-Length");
+
+    // Set upstream Authorization header (use insert to avoid duplicates)
+    req.headers_mut().insert(
         "Authorization",
         HeaderValue::from_str(format!("Bearer {}", ctx.conf.apikey).as_str()).unwrap(),
     );
@@ -183,18 +217,61 @@ async fn post_chat_completions(
 
     let dst_uri = Uri::try_from(format!("{}/chat/completions", url)).unwrap();
     println!("dst host:{}", dst_uri.host().unwrap());
-    req.headers_mut().remove("Host");
-    req.headers_mut().append(
+    // Use insert instead of append to avoid duplicate Host headers
+    req.headers_mut().insert(
         "Host",
         HeaderValue::from_str(dst_uri.host().unwrap()).unwrap(),
     );
-    *req.uri_mut() = dst_uri;
-    Ok(ctx
-        .client
-        .request(req)
+    *req.uri_mut() = dst_uri.clone();
+
+    // Collect the request body bytes upfront so we can reconstruct the request on retry
+    let body_bytes = req
+        .into_body()
+        .collect()
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?
-        .into_response())
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .to_bytes();
+
+    // Retry on connection errors (e.g. stale pooled connection closed by server)
+    let max_retries = 2;
+    for attempt in 0..=max_retries {
+        let retry_req = hyper::Request::builder()
+            .method(Method::POST)
+            .uri(dst_uri.clone())
+            .header("Content-Type", "application/json")
+            .header(
+                "Authorization",
+                HeaderValue::from_str(format!("Bearer {}", ctx.conf.apikey).as_str()).unwrap(),
+            )
+            .header(
+                "Host",
+                HeaderValue::from_str(dst_uri.host().unwrap()).unwrap(),
+            )
+            .body(Body::from(body_bytes.clone()))
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+        match ctx.client.request(retry_req).await {
+            Ok(resp) => return Ok(resp.into_response()),
+            Err(e) => {
+                let is_connection_err = e.is_connect()
+                    || e.to_string().contains("closed")
+                    || e.to_string().contains("reset")
+                    || e.to_string().contains("broken pipe");
+                eprintln!(
+                    "Upstream request failed (attempt {}/{}): {}",
+                    attempt + 1,
+                    max_retries + 1,
+                    e
+                );
+                if !is_connection_err || attempt == max_retries {
+                    return Err(StatusCode::BAD_GATEWAY);
+                }
+                // Brief pause before retrying to allow connection pool cleanup
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    Err(StatusCode::BAD_GATEWAY)
 }
 
 pub async fn stop_server(handle: tauri::AppHandle) -> Result<String, String> {
@@ -232,8 +309,11 @@ pub async fn restart(handle: tauri::AppHandle) -> Result<(), String> {
 
 async fn fetch_models_from_api(api_addr: &str, apikey: &str) -> Vec<String> {
     let https = HttpsConnector::new();
-    let client =
-        hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
+    let mut client_builder = hyper_util::client::legacy::Client::builder(TokioExecutor::new());
+    client_builder.pool_idle_timeout(Duration::from_secs(10));
+    client_builder.pool_max_idle_per_host(2);
+    client_builder.retry_canceled_requests(true);
+    let client = client_builder.build(https);
 
     let mut url = api_addr.to_string();
     if url.ends_with('/') {
@@ -260,7 +340,7 @@ async fn fetch_models_from_api(api_addr: &str, apikey: &str) -> Vec<String> {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
-    
+
     if !resp.status().is_success() {
         return Vec::new();
     }
@@ -282,7 +362,11 @@ async fn fetch_models_from_api(api_addr: &str, apikey: &str) -> Vec<String> {
         .and_then(|d| d.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+                .filter_map(|item| {
+                    item.get("id")
+                        .and_then(|id| id.as_str())
+                        .map(|s| s.to_string())
+                })
                 .collect()
         })
         .unwrap_or_default()

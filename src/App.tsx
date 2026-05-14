@@ -4,7 +4,6 @@ import "./global.css";
 import { invoke } from '@tauri-apps/api/core';
 import { Store } from "@tauri-apps/plugin-store";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { TrayIcon } from "@tauri-apps/api/tray";
 import { Menu } from "@tauri-apps/api/menu";
 import { createStartMenu, createStopMenu, createTray } from "./lib/menu";
@@ -17,10 +16,10 @@ type Config = {
   api_addr: string;
   apikey: string;
   skills: string[];
+  selected_models: string[];
 }
 
 type ConnectStatus = "disconnected" | "connecting" | "connected";
-
 
 function App() {
   const [port, setPort] = useState(11434);
@@ -28,9 +27,35 @@ function App() {
   const [apiAddr, setApiAddr] = useState("https://api.deepseek.com/v1");
   const [apikey, setApikey] = useState("");
   const [skills, setSkills] = useState<string[]>([]);
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [modelSearchQuery, setModelSearchQuery] = useState("");
+  const [showModelModal, setShowModelModal] = useState(false);
+  const [tempSelectedModels, setTempSelectedModels] = useState<string[]>([]);
   const [connectStatus, setConnectStatus] = useState<ConnectStatus>("disconnected");
+  const [isStarting, setIsStarting] = useState(false);
   const trayRef = useRef<TrayIcon>(null);
   const menuRef = useRef<Menu>(null);
+  const modelModalRef = useRef<HTMLDialogElement>(null);
+
+  // Open/close modal
+  useEffect(() => {
+    if (showModelModal) {
+      modelModalRef.current?.showModal();
+    } else {
+      modelModalRef.current?.close();
+    }
+  }, [showModelModal]);
+
+  // Sync state when native dialog is closed (e.g. ESC key)
+  useEffect(() => {
+    const dialog = modelModalRef.current;
+    if (!dialog) return;
+    const onCancel = () => setShowModelModal(false);
+    dialog.addEventListener("cancel", onCancel);
+    return () => dialog.removeEventListener("cancel", onCancel);
+  }, []);
+
   useEffect(() => {
     if (trayRef && !trayRef.current) {
       (async () => {
@@ -92,6 +117,7 @@ function App() {
       setApikey(config.apikey || "");
       setApiAddr(config.api_addr || "https://api.deepseek.com/v1");
       setSkills(config.skills || []);
+      setSelectedModels(config.selected_models || []);
     })();
   }, []);
 
@@ -101,21 +127,99 @@ function App() {
     })
   }, []);
 
-  const aboutRef = useRef<HTMLDialogElement>(null);
+  // Debounce fetch models when apikey or apiAddr changes
+  useEffect(() => {
+    if (!apiAddr || !apikey) {
+      setAvailableModels([]);
+      return;
+    }
+    const handler = setTimeout(async () => {
+      try {
+        const models = await invoke<string[]>("fetch_models", { apiAddr: apiAddr, apikey: apikey });
+        setAvailableModels(models);
+      } catch (e) {
+        console.error("Failed to fetch models:", e);
+        setAvailableModels([]);
+      }
+    }, 500);
+    return () => clearTimeout(handler);
+  }, [apiAddr, apikey]);
 
   return (
-    <main className={"w-screen h-screen overflow-hidden flex flex-col items-start justify-start gap-2 px-3 pt-1 pb-3 font-semibold text-sm text-center bg-neutral-200/35"}>
+    <main className={"w-full h-full flex flex-col items-start justify-start gap-2 px-3 pt-1 pb-3 font-semibold text-sm text-center bg-neutral-200/35"}>
       {/* <div className={"h-10 w-full border-b border-transparent shadow-2xl"} data-tauri-drag-region /> */}
-      <div className="hero bg-base-200 h-20 bg-gradient-to-br from-10% to-95% from-sky-500/80 via-60% via-purple-400/50 to-lime-500/95 rounded-sm">
-        <div className="hero-content text-center text-gray-100/80 select-none cursor-default rounded-sm overflow-hidden">
+      <div className="hero bg-base-200 h-16 bg-gradient-to-br from-10% to-95% from-sky-500/80 via-60% via-purple-400/50 to-lime-500/95 rounded-sm shrink-0">
+        <div className="hero-content text-center text-gray-100/80 select-none cursor-default rounded-sm overflow-hidden py-1">
           <div className="w-full">
-            <h1 className="text-5xl font-semibold font-mono font-stretch-expanded text-white text-shadow-lg text-shadow-black/50">
+            <h1 className="text-3xl font-semibold font-mono font-stretch-expanded text-white text-shadow-lg text-shadow-black/50">
               DEEPROXY
             </h1>
           </div>
         </div>
       </div>
-      <div className={"w-full grid grid-cols-1 gap-2 p-2 border border-neutral-300/75 rounded-sm"}>
+
+
+      <div className={"inline-flex w-full flex-1 flex-row-reverse items-center justify-start p-1 gap-4"}>
+        <button
+          className={"btn btn-sm btn-error select-none cursor-default text-white min-w-20"}
+          onClick={() => {
+            (async () => {
+              invoke("stop");
+            })();
+          }}
+          disabled={connectStatus === "disconnected"}
+        >
+          停止
+        </button>
+        <button
+          className={"btn btn-sm btn-success select-none cursor-default min-w-20"}
+          onClick={async () => {
+            setIsStarting(true);
+            try {
+              if (connectStatus === "disconnected") {
+                await invoke("start_server");
+              } else {
+                await invoke("restart");
+              }
+            } catch (error) {
+              console.error("Start/restart failed:", error);
+              setConnectStatus("disconnected");
+            } finally {
+              setIsStarting(false);
+            }
+          }}
+          disabled={addr.length === 0 || port < 1 || port > 65535 || !isValidIpAddress(addr) || apiAddr.length === 0 || apikey.length === 0 || isStarting}
+        >
+          {isStarting ? (
+            <span className="loading loading-spinner loading-xs"></span>
+          ) : (
+            `${connectStatus === "disconnected" ? "启动" : "重启"}`
+          )}
+        </button>
+        <button
+          className={"btn btn-sm btn-primary select-none cursor-default min-w-20"}
+          onClick={() => {
+            const config: Config = {
+              addr: addr,
+              port: port,
+              api_addr: apiAddr,
+              apikey: apikey,
+              skills: skills,
+              selected_models: selectedModels
+            };
+
+            (async () => {
+              const store = await Store.load("config.json");
+              await store.set("config", config);
+              await store.save();
+            })();
+          }}
+          disabled={addr.length === 0 || port < 1 || port > 65535 || !isValidIpAddress(addr) || apiAddr.length === 0 || apikey.length === 0 || connectStatus !== "disconnected"}
+        >
+          {`保存`}
+        </button>
+      </div>
+      <div className={"w-full min-h-[360px] flex flex-col gap-2 p-2 border border-neutral-300/75 rounded-sm overflow-y-auto min-h-0"}>
         <div className={"w-full grid grid-cols-8 items-center p-1 gap-1"}>
           <span className="label col-span-2 select-none cursor-default">监听:</span>
           <input
@@ -125,7 +229,7 @@ function App() {
             spellcheck={false}
             onInput={(e: JSX.TargetedEvent<HTMLInputElement, Event>) => {
               const target = e.target as HTMLInputElement;
-              if (target && target.value && isValidIpAddress(target.value)) {
+              if (target) {
                 setAddr(target.value)
               }
             }}
@@ -173,6 +277,39 @@ function App() {
               setApiAddr(target.value)
             }}
           />
+        </div>
+        <div className={"w-full grid grid-cols-8 items-start p-1 gap-1"}>
+          <span className="label col-span-2 select-none cursor-default pt-1">模型:</span>
+          <div className="col-span-6">
+            <div
+              className="input input-xs w-full min-h-[2rem] h-auto flex flex-wrap gap-1 p-1 cursor-pointer"
+              onClick={() => {
+                if (connectStatus === "disconnected") {
+                  setTempSelectedModels([...selectedModels]);
+                  setModelSearchQuery("");
+                  setShowModelModal(true);
+                }
+              }}
+            >
+              {selectedModels.length === 0 ? (
+                <span className="text-neutral-content/50 text-xs">选择模型...</span>
+              ) : (
+                selectedModels.map(m => (
+                  <span key={m} className="badge badge-xs badge-primary gap-1">
+                    {m}
+                    {connectStatus === "disconnected" && (
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedModels(prev => prev.filter(x => x !== m));
+                      }}>
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                    )}
+                  </span>
+                ))
+              )}
+            </div>
+          </div>
         </div>
         <div className={"w-full grid grid-cols-8 items-center p-1 gap-1"}>
           <span className="label col-span-2 select-none cursor-default">模型能力:</span>
@@ -234,94 +371,94 @@ function App() {
           </div>
         </div>
       </div>
-      <div className={"inline-flex w-full flex-1 flex-row-reverse items-center justify-start p-1 gap-2"}>
-        <button
-          className={"btn btn-xs btn-error select-none cursor-default text-white"}
-          onClick={() => {
-            (async () => {
-              invoke("stop");
-            })();
-          }}
-          disabled={connectStatus === "disconnected"}
-        >
-          停止
-        </button>
-        <button
-          className={"btn btn-xs btn-success select-none cursor-default"}
-          onClick={() => {
-            (async () => {
-              try {
-                if (connectStatus === "disconnected") {
-                  await invoke("start_server");
-                } else {
-                  await invoke("restart");
-                }
-              } catch (error) {
-                console.error("Start/restart failed:", error);
-                setConnectStatus("disconnected");
-              }
-            })();
-          }}
-          disabled={addr.length === 0 || port < 1 || port > 65535 || !isValidIpAddress(addr) || apiAddr.length === 0 || apikey.length === 0}
-        >
-          {`${connectStatus === "disconnected" ? "启动" : "重启"}`}
-        </button>
-        <button
-          className={"btn btn-xs btn-primary select-none cursor-default"}
-          onClick={() => {
-            const config: Config = {
-              addr: addr,
-              port: port,
-              api_addr: apiAddr,
-              apikey: apikey,
-              skills: skills
-            };
 
-            (async () => {
-              const store = await Store.load("config.json");
-              await store.set("config", config);
-              await store.save();
-            })();
-          }}
-          disabled={addr.length === 0 || port < 1 || port > 65535 || !isValidIpAddress(addr) || apiAddr.length === 0 || apikey.length === 0 || connectStatus !== "disconnected"}
-        >
-          {`保存`}
-        </button>
-        <button
-          className={"btn btn-circle btn-xs"}
-          onClick={() => {
-            aboutRef.current?.showModal();
-          }}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info" viewBox="0 0 16 16">
-            <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
-          </svg>
-        </button>
-        <div className={"flex-1 flex h-full flex-row justify-start items-center  gap-2 text-xs select-none cursor-default"}>
-          <div class="inline-grid *:[grid-area:1/1]">
-            <div className={`status ${connectStatus === "disconnected" ? "status-secondary animate-none" : connectStatus === "connecting" ? "status-warning animate-ping" : "status-success animate-ping"}`}></div>
-            <div className={`status ${connectStatus === "disconnected" ? "status-secondary" : connectStatus === "connecting" ? "status-warning" : "status-success"}`}></div>
-          </div>
-          {connectStatus === "disconnected" ? "未启动" : connectStatus === "connecting" ? "启动中" : "已启动"}
-        </div>
-        <dialog className={"modal"} ref={aboutRef}>
-          <div className={"modal-box p-3 gap-2 overflow-hidden"}>
-            <h3 className={"font-semibold text-lg"}>关于Deeproxy</h3>
-            <p className={"font-mono text-sm cursor-pointer hover:underline hover:text-primary"} onClick={() => {
-              aboutRef.current?.close();
-              openUrl("https://github.com/lzm04521/deeproxy");
-            }}>
-              github.com/lzm04521/deeproxy
-            </p>
-            <div className={"modal-action"}>
-              <form method={"dialog"}>
-                <button>关闭</button>
-              </form>
+      {/* 模型选择模态框 */}
+      <dialog ref={modelModalRef} className="modal modal-middle">
+        <div className="modal-box flex flex-col">
+          <h3 className="font-bold text-base mb-2">选择模型</h3>
+
+          {/* 搜索框 */}
+          <input
+            type="text"
+            placeholder="搜索模型..."
+            className="input input-bordered input-sm w-full mb-2"
+            value={modelSearchQuery}
+            onInput={(e: JSX.TargetedEvent<HTMLInputElement, Event>) => {
+              const target = e.target as HTMLInputElement;
+              setModelSearchQuery(target.value);
+            }}
+          />
+
+          {/* 已选数量提示 */}
+          {tempSelectedModels.length > 0 && (
+            <div className="text-xs text-neutral-content/60 mb-1">
+              已选 {tempSelectedModels.length} 个模型
             </div>
+          )}
+
+          {/* 模型列表 */}
+          <div className="flex-1 overflow-y-auto flex flex-col gap-0.5 min-h-0">
+            {availableModels
+              .filter(model =>
+                model.toLowerCase().includes(modelSearchQuery.toLowerCase())
+              )
+              .map(model => (
+                <label key={model} className="flex items-center gap-2 cursor-pointer px-2 py-1 hover:bg-base-200 rounded text-sm">
+                  <input
+                    type="checkbox"
+                    className="checkbox checkbox-xs"
+                    checked={tempSelectedModels.includes(model)}
+                    onChange={() => {
+                      setTempSelectedModels(prev =>
+                        prev.includes(model)
+                          ? prev.filter(m => m !== model)
+                          : [...prev, model]
+                      );
+                    }}
+                  />
+                  <span className="text-xs truncate">{model}</span>
+                </label>
+              ))}
+            {availableModels.length === 0 && (
+              <p className="text-center text-neutral-content/50 py-4 text-xs">
+                请先配置 API 地址和 ApiKey 以获取模型列表
+              </p>
+            )}
+            {availableModels.length > 0 &&
+              availableModels.filter(model =>
+                model.toLowerCase().includes(modelSearchQuery.toLowerCase())
+              ).length === 0 && (
+                <p className="text-center text-neutral-content/50 py-4 text-xs">
+                  未找到匹配的模型
+                </p>
+              )}
           </div>
 
-        </dialog>
-      </div>
+          {/* 按钮组 */}
+          <div className="modal-action mt-2 mb-0">
+            <button
+              className="btn btn-sm"
+              onClick={() => {
+                setShowModelModal(false);
+              }}
+            >
+              取消
+            </button>
+            <button
+              className="btn btn-sm btn-primary"
+              onClick={() => {
+                setSelectedModels([...tempSelectedModels]);
+                setShowModelModal(false);
+              }}
+            >
+              确定
+            </button>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button onClick={() => setShowModelModal(false)}>close</button>
+        </form>
+      </dialog>
     </main>
   );
 }
