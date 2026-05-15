@@ -41,6 +41,27 @@ function App() {
   const menuRef = useRef<Menu>(null);
   const modelModalRef = useRef<HTMLDialogElement>(null);
 
+  // 辅助函数：保存配置到 store
+  const saveConfig = async (updates: Partial<Config>) => {
+    try {
+      const store = await Store.load("config.json");
+      const config = await store.get("config") as Config;
+      if (config) {
+        const updatedConfig = { ...config, ...updates };
+        await store.set("config", updatedConfig);
+        await store.save();
+        
+        // 显示保存成功提示
+        setShowSaveSuccess(true);
+        setTimeout(() => {
+          setShowSaveSuccess(false);
+        }, 2000);
+      }
+    } catch (e) {
+      console.error("Failed to save config:", e);
+    }
+  };
+
   // Open/close modal
   useEffect(() => {
     if (showModelModal) {
@@ -335,9 +356,12 @@ function App() {
                   <span key={m} className="badge badge-xs badge-primary gap-1">
                     {m}
                     {connectStatus === "disconnected" && (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" onClick={(e) => {
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" onClick={async (e) => {
                         e.stopPropagation();
-                        setSelectedModels(prev => prev.filter(x => x !== m));
+                        const newModels = selectedModels.filter(x => x !== m);
+                        setSelectedModels(newModels);
+                        // 立即保存
+                        await saveConfig({ selected_models: newModels });
                       }}>
                         <path d="M18 6L6 18M6 6l12 12" />
                       </svg>
@@ -357,14 +381,13 @@ function App() {
                 className={"checkbox-sm"}
                 checked={skills.includes("tools")}
                 disabled={connectStatus !== "disconnected"}
-                onChange={() => {
-                  setSkills(prev => {
-                    if (prev.includes("tools")) {
-                      return prev.filter(item => item !== "tools")
-                    } else {
-                      return [...prev, "tools"]
-                    }
-                  })
+                onChange={async () => {
+                  const newSkills = skills.includes("tools") 
+                    ? skills.filter(item => item !== "tools")
+                    : [...skills, "tools"];
+                  setSkills(newSkills);
+                  // 立即保存
+                  await saveConfig({ skills: newSkills });
                 }}
               />
               tools
@@ -375,14 +398,13 @@ function App() {
                 className={"checkbox-sm select-none cursor-default"}
                 checked={skills.includes("vision")}
                 disabled={connectStatus !== "disconnected"}
-                onChange={() => {
-                  setSkills(prev => {
-                    if (prev.includes("vision")) {
-                      return prev.filter(item => item !== "vision")
-                    } else {
-                      return [...prev, "vision"]
-                    }
-                  })
+                onChange={async () => {
+                  const newSkills = skills.includes("vision")
+                    ? skills.filter(item => item !== "vision")
+                    : [...skills, "vision"];
+                  setSkills(newSkills);
+                  // 立即保存
+                  await saveConfig({ skills: newSkills });
                 }}
               />
               vision
@@ -393,14 +415,13 @@ function App() {
                 className={"checkbox-sm"}
                 checked={skills.includes("thinking")}
                 disabled={connectStatus !== "disconnected"}
-                onChange={() => {
-                  setSkills(prev => {
-                    if (prev.includes("thinking")) {
-                      return prev.filter(item => item !== "thinking")
-                    } else {
-                      return [...prev, "thinking"]
-                    }
-                  })
+                onChange={async () => {
+                  const newSkills = skills.includes("thinking")
+                    ? skills.filter(item => item !== "thinking")
+                    : [...skills, "thinking"];
+                  setSkills(newSkills);
+                  // 立即保存
+                  await saveConfig({ skills: newSkills });
                 }}
               />
               thinking
@@ -430,6 +451,12 @@ function App() {
                       config.autostart = newAutostart;
                       await store.set("config", config);
                       await store.save();
+                      
+                      // 显示保存成功提示
+                      setShowSaveSuccess(true);
+                      setTimeout(() => {
+                        setShowSaveSuccess(false);
+                      }, 2000);
                     }
                   } catch (e) {
                     console.error("Failed to set autostart:", e);
@@ -518,9 +545,11 @@ function App() {
             </button>
             <button
               className="btn btn-sm btn-primary"
-              onClick={() => {
+              onClick={async () => {
                 setSelectedModels([...tempSelectedModels]);
                 setShowModelModal(false);
+                // 立即保存
+                await saveConfig({ selected_models: [...tempSelectedModels] });
               }}
             >
               确定

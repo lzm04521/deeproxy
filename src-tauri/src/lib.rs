@@ -56,10 +56,21 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             macos::set_activation_policy(macos::ActivationPolicy::Accessory);
+            
+            // 检查是否是开机自启
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            let is_autostart = {
+                use tauri_plugin_autostart::ManagerExt;
+                let autostart_manager = app.autolaunch();
+                autostart_manager.is_enabled().unwrap_or(false)
+            };
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            let is_autostart = false;
+            
             let win_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("deeproxy")
                 .resizable(false)
-                .visible(true)
+                .visible(!is_autostart)  // 如果是开机自启则隐藏窗口
                 .minimizable(false)
                 .maximizable(false)
                 .inner_size(375.0, 500.0);
@@ -77,21 +88,13 @@ pub fn run() {
                 _window.eval(disable_context_menu_script).unwrap();
             }
             
-            // 检查是否是开机自启
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            {
-                use tauri_plugin_autostart::ManagerExt;
-                let autostart_manager = app.autolaunch();
-                let is_autostart = autostart_manager.is_enabled().unwrap_or(false);
-                
-                if is_autostart {
-                    // 如果是开机自启，自动启动代理服务
-                    let napp = app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        let _ = proxy::start_api_server(napp).await;
-                    });
-                }
+            if is_autostart {
+                // 如果是开机自启，自动启动代理服务并保持窗口隐藏
+                let napp = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let _ = proxy::start_api_server(napp).await;
+                });
             }
 
             Ok(())
